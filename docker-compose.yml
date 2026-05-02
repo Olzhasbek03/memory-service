@@ -1,0 +1,13 @@
+services:
+  memory-service:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - memory-data:/data
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  memory-data:

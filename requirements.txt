@@ -1,0 +1,7 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+openai==1.57.0
+sqlite-utils==3.37
+numpy==1.26.4
+python-dotenv==1.0.1
+tiktoken==0.7.0
