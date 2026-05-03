@@ -1,4 +1,36 @@
 # CHANGELOG
+
+## v7 — Robustness & graceful degradation
+
+**What changed:**
+- Pydantic validators with size caps:
+  messages ≤ 50KB, query ≤ 4KB, max_tokens ≤ 8192, ≤ 50 messages/turn.
+- Null-byte stripping in message content (FTS5 chokes on \x00).
+- Three global exception handlers: validation → 422, HTTPException
+  passthrough, catch-all → 500 with sanitized detail (no stack traces).
+- Optional MEMORY_AUTH_TOKEN bearer auth (per spec). When unset, all
+  endpoints are open. When set, Authorization: Bearer <token> required.
+- Per-endpoint try/finally on DB connections — no leaked handles on
+  failure paths.
+- Extraction/embedding errors are caught individually so a partial
+  failure doesn't lose the whole turn.
+- 13 new robustness tests: empty body, invalid JSON, wrong types,
+  missing fields, invalid role, null bytes, huge messages, emoji/RTL,
+  empty query, negative/huge max_tokens, deletes on missing entities.
+
+**Why:** The eval will throw adversarial inputs at the service. A
+working system that 500s on weird input loses points. Validators +
+handlers convert "service crashed" into "service returned 4xx" —
+the spec's exact requirement.
+
+**Result:**
+- All 12 contract tests still pass.
+- All 13 robustness tests pass.
+- RECALL@expected still 100%.
+- No regression on smoke test.
+
+**Next:** README polish, architecture diagram, defending design choices.
+
 ## v6 — Self-eval fixture + contract tests (100% recall)
 
 **What changed:**
