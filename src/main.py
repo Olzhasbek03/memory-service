@@ -1,182 +1,289 @@
+import os
 import uuid
 import json
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-load_dotenv()  # read .env file
+load_dotenv()
 
 from .database import init_db, get_db
 from .models import (
     TurnRequest, RecallRequest, SearchRequest,
-    RecallResponse, SearchResponse
 )
 from .extraction import extract_memories
-from .recall import recall, store_embedding, cosine_similarity
-from .retrieval import get_embedding
-import numpy as np
+from .recall import recall, store_embedding
+from .retrieval import get_embedding, cosine
+
+
+# ─────────────────────────────────────────────
+# Startup
+# ─────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()  # create tables on startup
+    init_db()
     yield
 
+
 app = FastAPI(title="Memory Service", lifespan=lifespan)
+
+
+# ─────────────────────────────────────────────
+# Global exception handlers
+# ─────────────────────────────────────────────
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": "validation_failed", "detail": str(exc.errors())[:500]},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": "http_error", "detail": exc.detail},
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_handler(request: Request, exc: Exception):
+    print(f"💥 Unexpected error on {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_error", "detail": "an unexpected error occurred"},
+    )
+
+
+# ─────────────────────────────────────────────
+# Optional bearer auth
+# ─────────────────────────────────────────────
+
+EXPECTED_TOKEN = os.environ.get("MEMORY_AUTH_TOKEN")
+
+
+async def check_auth(authorization: Optional[str] = Header(None)):
+    if not EXPECTED_TOKEN:
+        return True
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.removeprefix("Bearer ").strip()
+    if token != EXPECTED_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return True
+
 
 # ─────────────────────────────────────────────
 # GET /health
 # ─────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
+
 # ─────────────────────────────────────────────
 # POST /turns
 # ─────────────────────────────────────────────
+
 @app.post("/turns", status_code=201)
-def ingest_turn(req: TurnRequest):
+def ingest_turn(req: TurnRequest, _: bool = Depends(check_auth)):
     turn_id = str(uuid.uuid4())
     conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO turns
+               (id, session_id, user_id, messages, timestamp, metadata)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                turn_id,
+                req.session_id,
+                req.user_id,
+                json.dumps([m.dict() for m in req.messages]),
+                req.timestamp,
+                json.dumps(req.metadata or {})[:10_000],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    # Store the raw turn
-    conn.execute("""
-        INSERT INTO turns (id, session_id, user_id, messages, timestamp, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        turn_id,
-        req.session_id,
-        req.user_id,
-        json.dumps([m.dict() for m in req.messages]),
-        req.timestamp,
-        json.dumps(req.metadata or {})
-    ))
-    conn.commit()
-    conn.close()
+    # Embed the turn text
+    turn_text = " ".join(f"{m.role}: {m.content}" for m in req.messages)
+    if turn_text.strip():
+        try:
+            store_embedding(turn_id, "turn", turn_text)
+        except Exception as e:
+            print(f"⚠️  Turn embedding failed: {e}")
 
-    # Embed the raw turn text
-    turn_text = " ".join([f"{m.role}: {m.content}" for m in req.messages])
-    store_embedding(turn_id, "turn", turn_text)
+    # Extract memories
+    try:
+        stored_memories = extract_memories(
+            turn_id=turn_id,
+            user_id=req.user_id,
+            session_id=req.session_id,
+            messages=[m.dict() for m in req.messages],
+            timestamp=req.timestamp,
+        )
+    except Exception as e:
+        print(f"⚠️  Extraction failed (turn still saved): {e}")
+        stored_memories = []
 
-    # Extract memories — returns list of stored memory dicts with their ids
-    stored_memories = extract_memories(
-        turn_id=turn_id,
-        user_id=req.user_id,
-        session_id=req.session_id,
-        messages=[m.dict() for m in req.messages],
-        timestamp=req.timestamp
-    )
-
-    # Store embeddings for each extracted memory
-    # This is critical — without this, recall finds nothing
+    # Embed each extracted memory
     for mem in stored_memories:
-        if mem.get("id") and mem.get("value"):
-            store_embedding(mem["id"], "memory", mem["value"])
-            print(f"📎 Embedded memory: {mem['key']} = {mem['value'][:50]}")
+        try:
+            if mem.get("id") and mem.get("value"):
+                store_embedding(mem["id"], "memory", mem["value"])
+                print(f"📎 Embedded memory: {mem['key']} = {mem['value'][:50]}")
+        except Exception as e:
+            print(f"⚠️  Memory embedding failed: {e}")
 
     return {"id": turn_id}
+
 
 # ─────────────────────────────────────────────
 # POST /recall
 # ─────────────────────────────────────────────
+
 @app.post("/recall")
-def recall_context(req: RecallRequest):
+def recall_context(req: RecallRequest, _: bool = Depends(check_auth)):
     try:
         context, citations = recall(
             query=req.query,
             session_id=req.session_id,
             user_id=req.user_id,
-            max_tokens=req.max_tokens
+            max_tokens=req.max_tokens,
         )
         return {"context": context, "citations": citations}
     except Exception as e:
-        print(f"Recall error: {e}")
+        print(f"⚠️  Recall error: {e}")
         return {"context": "", "citations": []}
+
 
 # ─────────────────────────────────────────────
 # POST /search
 # ─────────────────────────────────────────────
-@app.post("/search")
-def search(req: SearchRequest):
-    conn = get_db()
 
-    # Get all embeddings
-    rows = conn.execute("""
-        SELECT e.source_id, e.content, e.embedding,
-               t.session_id, t.timestamp, t.metadata
-        FROM embeddings e
-        JOIN turns t ON t.id = e.source_id
-        WHERE e.source_type = 'turn'
-        AND (? IS NULL OR t.session_id = ?)
-        AND (? IS NULL OR t.user_id = ?)
-        ORDER BY t.timestamp DESC
-    """, (req.session_id, req.session_id,
-          req.user_id, req.user_id)).fetchall()
-    conn.close()
+@app.post("/search")
+def search(req: SearchRequest, _: bool = Depends(check_auth)):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT e.source_id, e.content, e.embedding,
+                      t.session_id, t.timestamp, t.metadata
+               FROM embeddings e
+               JOIN turns t ON t.id = e.source_id
+               WHERE e.source_type = 'turn'
+               AND (? IS NULL OR t.session_id = ?)
+               AND (? IS NULL OR t.user_id = ?)
+               ORDER BY t.timestamp DESC""",
+            (req.session_id, req.session_id, req.user_id, req.user_id),
+        ).fetchall()
+    finally:
+        conn.close()
 
     if not rows:
         return {"results": []}
 
-    query_emb = get_embedding(req.query)
+    try:
+        query_emb = get_embedding(req.query)
+    except Exception as e:
+        print(f"⚠️  Search embedding failed: {e}")
+        return {"results": []}
+
     scored = []
     for row in rows:
-        emb = json.loads(row["embedding"])
-        score = cosine_similarity(query_emb, emb)
-        scored.append({
-            "content": row["content"],
-            "score": score,
-            "session_id": row["session_id"],
-            "timestamp": row["timestamp"],
-            "metadata": json.loads(row["metadata"] or "{}")
-        })
+        try:
+            emb = json.loads(row["embedding"])
+            score = cosine(query_emb, emb)
+            scored.append({
+                "content": row["content"],
+                "score": score,
+                "session_id": row["session_id"],
+                "timestamp": row["timestamp"],
+                "metadata": json.loads(row["metadata"] or "{}"),
+            })
+        except Exception:
+            continue
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return {"results": scored[:req.limit]}
+    return {"results": scored[: req.limit]}
+
 
 # ─────────────────────────────────────────────
 # GET /users/{user_id}/memories
 # ─────────────────────────────────────────────
-@app.get("/users/{user_id}/memories")
-def get_memories(user_id: str):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM memories
-        WHERE user_id = ?
-        ORDER BY active DESC, updated_at DESC
-    """, (user_id,)).fetchall()
-    conn.close()
 
-    memories = [dict(row) for row in rows]
-    return {"memories": memories}
+@app.get("/users/{user_id}/memories")
+def get_memories(user_id: str, _: bool = Depends(check_auth)):
+    if len(user_id) > 200:
+        raise HTTPException(status_code=400, detail="user_id too long")
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM memories
+               WHERE user_id = ?
+               ORDER BY active DESC, updated_at DESC""",
+            (user_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"memories": [dict(row) for row in rows]}
+
 
 # ─────────────────────────────────────────────
 # DELETE /sessions/{session_id}
 # ─────────────────────────────────────────────
-@app.delete("/sessions/{session_id}", status_code=204)
-def delete_session(session_id: str):
-    conn = get_db()
-    # Get turn ids for this session first
-    turns = conn.execute(
-        "SELECT id FROM turns WHERE session_id = ?", (session_id,)
-    ).fetchall()
-    turn_ids = [t["id"] for t in turns]
 
-    conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
-    conn.execute("DELETE FROM memories WHERE source_session = ?", (session_id,))
-    for tid in turn_ids:
-        conn.execute("DELETE FROM embeddings WHERE source_id = ?", (tid,))
-    conn.commit()
-    conn.close()
+@app.delete("/sessions/{session_id}", status_code=204)
+def delete_session(session_id: str, _: bool = Depends(check_auth)):
+    if len(session_id) > 200:
+        raise HTTPException(status_code=400, detail="session_id too long")
+    conn = get_db()
+    try:
+        turns = conn.execute(
+            "SELECT id FROM turns WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        turn_ids = [t["id"] for t in turns]
+        conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM memories WHERE source_session = ?", (session_id,))
+        for tid in turn_ids:
+            conn.execute("DELETE FROM embeddings WHERE source_id = ?", (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 # ─────────────────────────────────────────────
 # DELETE /users/{user_id}
 # ─────────────────────────────────────────────
+
 @app.delete("/users/{user_id}", status_code=204)
-def delete_user(user_id: str):
+def delete_user(user_id: str, _: bool = Depends(check_auth)):
+    if len(user_id) > 200:
+        raise HTTPException(status_code=400, detail="user_id too long")
     conn = get_db()
-    conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM turns WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM embeddings WHERE source_id IN (SELECT id FROM turns WHERE user_id = ?)", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        mem_rows = conn.execute(
+            "SELECT id FROM memories WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        turn_rows = conn.execute(
+            "SELECT id FROM turns WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM turns WHERE user_id = ?", (user_id,))
+        for m in mem_rows:
+            conn.execute("DELETE FROM embeddings WHERE source_id = ?", (m["id"],))
+            conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (m["id"],))
+        for t in turn_rows:
+            conn.execute("DELETE FROM embeddings WHERE source_id = ?", (t["id"],))
+        conn.commit()
+    finally:
+        conn.close()
