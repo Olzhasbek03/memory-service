@@ -1,4 +1,26 @@
 # CHANGELOG
+## v4 — Fact evolution with semantic supersession
+
+**What changed:**
+- Key normalization: 20+ LLM key variants collapse to canonical topics
+  (job/work/employer → employment). Stops same-topic memories being
+  treated as different topics due to LLM variability.
+- New evolution.py module: at write time, every new memory goes through
+  resolve_evolution() before INSERT.
+- Decision ladder (cheapest first):
+    1. Explicit correction type → always supersede
+    2. Same canonical key + subject → supersede mutable facts
+    3. LLM judge for stable facts needing confirmation
+- Old memories marked active=0, never deleted. Supersession chain
+  preserved and inspectable via /users/{user_id}/memories.
+
+**Result:** Stripe → Notion test passes perfectly.
+Docker logs show: INSERT (Stripe) then SUPERSEDE (Notion).
+/recall returns only Notion. Stripe preserved in history with active=0.
+
+**Next:** Tests + recall quality fixture with real metrics.
+
+
 ## v3 — Query rewriting + entity-anchored multi-hop recall
 
 **What changed:**
