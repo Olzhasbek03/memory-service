@@ -1,4 +1,29 @@
 # CHANGELOG
+## v6 — Self-eval fixture + contract tests (100% recall)
+
+**What changed:**
+- 5-scenario fixture in fixtures/conversations.json covering:
+  basic facts, fact evolution, multi-hop, noise resistance, cross-session.
+- 12 contract tests: roundtrip, shapes, status codes, concurrent users,
+  malformed input, unicode, empty messages, cleanup endpoints.
+- Recall quality runner that ingests fixture, runs probes, prints a
+  hit/miss report, and asserts ≥70% threshold.
+
+**Result on full pipeline (L1-L5):**
+- Contract tests: 12/12 passing
+- RECALL@expected: 7/7 = 100%
+- Multi-hop probe (Biscuit's city) → Berlin: HIT
+- Fact evolution probe (Bob's current employer) → Notion only,
+  no Stripe leakage: HIT
+- Noise resistance (car never mentioned) → empty: HIT
+- Supersession chain visible: fixture-bob shows 1 active, 1 superseded
+
+**Why this matters:** Without measurable scores, CHANGELOG entries
+are vibes. With this fixture, every future change can be evaluated
+quantitatively before commit.
+
+**Next:** Robustness pass — large payloads, bad auth, edge cases.
+
 ## v4 — Fact evolution with semantic supersession
 
 **What changed:**
