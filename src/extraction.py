@@ -1,104 +1,230 @@
+"""
+Extraction pipeline: raw conversation → structured memories.
+
+Design principles:
+- Extract about the USER first; mark anything about other people clearly.
+- Capture entities (names, places, orgs) for downstream multi-hop linking.
+- Distinguish stable facts (lives in X) from events (going to X tonight)
+  via the `type` and `confidence` fields.
+- Detect corrections explicitly so the recall pipeline can prioritize them.
+- Refuse to extract when nothing factual was said. Empty list is correct.
+"""
 import json
 import uuid
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from .database import get_db
 
-client = OpenAI()  # reads OPENAI_API_KEY from environment automatically
+client = OpenAI()
+EXTRACTION_MODEL = "gpt-4o-mini"
 
-EXTRACTION_PROMPT = """You are a memory extraction system. Read the conversation and extract structured facts about the user.
+EXTRACTION_SYSTEM_PROMPT = """You extract durable, queryable memories from conversation turns.
 
-For each fact, output a JSON object with these fields:
-- type: one of "fact", "preference", "opinion", "event"
-- key: a short topic label like "employment", "location", "pet", "food_preference", "hobby"
-- value: the full fact as a clear sentence
-- confidence: 0.0 to 1.0 (how certain are you this is a stable fact?)
+OUTPUT FORMAT
+Return ONLY a JSON object with one field: "memories" — an array.
+If nothing factual is said, return {"memories": []}. Do not invent.
 
-Rules:
-- Extract ONLY facts about the USER (not the assistant)
-- Include implicit facts ("I walked Biscuit" → user has a dog named Biscuit)
-- Include corrections ("actually I meant..." → extract the corrected fact)
-- For temporary events (user is going to a movie tonight), use type "event" and low confidence
-- For stable facts (user lives in Berlin), use type "fact" and high confidence
-- If nothing factual is said, return an empty list
+Each memory has these fields:
+{
+  "type": "fact" | "preference" | "opinion" | "event" | "correction",
+  "key": "<short stable topic slug>",
+  "value": "<full sentence in third person about the user>",
+  "subject": "user" | "other:<name>",
+  "entities": ["<entity1>", "<entity2>"],
+  "confidence": 0.0 to 1.0,
+  "is_correction_of": "<key being corrected, or null>",
+  "temporal": "stable" | "current" | "transient"
+}
 
-Return ONLY a JSON array, no other text. Example:
-[
-  {"type": "fact", "key": "location", "value": "Lives in Berlin, moved from NYC", "confidence": 0.95},
-  {"type": "preference", "key": "food", "value": "Vegetarian, allergic to shellfish", "confidence": 0.99},
-  {"type": "fact", "key": "pet", "value": "Has a dog named Biscuit", "confidence": 0.95}
-]"""
+KEY GUIDELINES
+- key is a slug like "employment", "location", "pet", "food_diet",
+  "food_allergy", "hobby", "family_spouse", "preference_communication".
+- key must be stable across mentions. Same topic always gets the same key.
+- value is a complete sentence: "User works at Notion as a PM".
 
-def extract_memories(turn_id: str, user_id: str, session_id: str, messages: list, timestamp: str):
-    """Extract structured memories from a conversation turn."""
-    if not user_id:
-        return  # can't store user memories without a user_id
+TYPE GUIDELINES
+- fact: durable truth ("lives in Berlin", "has a dog named Biscuit")
+- preference: stable like/dislike ("vegetarian", "prefers concise answers")
+- opinion: stance that may evolve ("thinks TypeScript is overengineered")
+- event: time-bound happening ("going to a wedding Saturday")
+- correction: explicit fix ("actually, I meant Notion not Stripe")
 
-    # Format messages for the LLM
-    conversation_text = "\n".join([
-        f"{m['role'].upper()}: {m['content']}"
-        for m in messages
-    ])
+SUBJECT
+- "user" if the fact is about the user themselves
+- "other:Alice" if about someone else they mentioned by name
+- Do not store memories with subject "other:..." unless the relationship
+  to the user is clear ("my wife Alice works at Stripe" → subject "other:Alice"
+  AND a separate fact with subject "user", key "family_spouse",
+  value "Spouse is Alice, who works at Stripe")
 
+ENTITIES
+- Names of people, pets, places, companies, products, technologies mentioned
+- Lowercase, singular form: ["biscuit", "berlin", "notion", "typescript"]
+- Used for cross-memory linking. Be liberal but accurate.
+
+CONFIDENCE
+- 0.95+: explicit statements ("I live in Berlin")
+- 0.7-0.9: implicit / inferred ("walking Biscuit" → has dog Biscuit)
+- 0.5-0.7: ambiguous ("might move to Berlin")
+- Below 0.5: do not extract
+
+TEMPORAL
+- stable: doesn't change week to week (allergies, name, hometown)
+- current: true now but may change (job, location, relationship status)
+- transient: time-bound (dinner plans, what they did this morning)
+
+GRANULARITY
+- Split lists. "I love Python and Go" → two preference memories.
+- Combine inseparable details. "Has a dog Biscuit, golden retriever, age 5"
+  → ONE memory: value="Has a golden retriever named Biscuit, age 5"
+
+DO NOT
+- Do not extract assistant statements as user facts.
+- Do not extract from greetings, acknowledgments, or chitchat.
+- Do not invent details not stated. If unsure, use lower confidence.
+- Do not extract the assistant's questions back to the user as facts.
+
+EXAMPLES
+
+Conversation:
+USER: I just moved to Berlin from NYC last month. My dog Biscuit hated the flight.
+ASSISTANT: That sounds rough! How is Biscuit settling in?
+
+Output:
+{"memories": [
+  {"type":"fact","key":"location","value":"User recently moved to Berlin from NYC","subject":"user","entities":["berlin","nyc"],"confidence":0.97,"is_correction_of":null,"temporal":"current"},
+  {"type":"fact","key":"pet","value":"User has a dog named Biscuit","subject":"user","entities":["biscuit"],"confidence":0.95,"is_correction_of":null,"temporal":"stable"}
+]}
+
+Conversation:
+USER: Sorry, I said Stripe earlier — I actually work at Notion.
+ASSISTANT: Got it, thanks for clarifying.
+
+Output:
+{"memories": [
+  {"type":"correction","key":"employment","value":"User works at Notion (not Stripe as previously said)","subject":"user","entities":["notion","stripe"],"confidence":0.99,"is_correction_of":"employment","temporal":"current"}
+]}
+
+Conversation:
+USER: Hey thanks!
+ASSISTANT: No problem!
+
+Output:
+{"memories": []}
+"""
+
+
+def _format_conversation(messages: List[Dict[str, Any]]) -> str:
+    lines = []
+    for m in messages:
+        role = m.get("role", "user").upper()
+        content = m.get("content", "")
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _call_extractor(conversation: str) -> List[Dict[str, Any]]:
+    """Call the LLM. Returns a list of raw memory dicts. Never raises."""
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=EXTRACTION_MODEL,
             messages=[
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {"role": "user", "content": f"Extract facts from this conversation:\n\n{conversation_text}"}
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": conversation},
             ],
-            temperature=0  # deterministic output
+            temperature=0,
+            response_format={"type": "json_object"},
         )
-
         raw = response.choices[0].message.content.strip()
-        extracted = json.loads(raw)
-
+        parsed = json.loads(raw)
+        memories = parsed.get("memories", [])
+        if not isinstance(memories, list):
+            return []
+        return memories
     except Exception as e:
-        print(f"⚠️ Extraction failed: {e}")
-        return
+        print(f"⚠️  Extraction LLM call failed: {e}")
+        return []
 
-    if not extracted:
-        return
 
+def _validate_memory(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Defensive validation. Drop malformed memories instead of crashing."""
+    required = {"type", "key", "value", "subject", "confidence"}
+    if not all(k in m for k in required):
+        return None
+    if m["type"] not in {"fact", "preference", "opinion", "event", "correction"}:
+        return None
+    try:
+        conf = float(m["confidence"])
+    except (TypeError, ValueError):
+        return None
+    if conf < 0.5:
+        return None
+    return {
+        "type": m["type"],
+        "key": str(m["key"])[:80],
+        "value": str(m["value"])[:1000],
+        "subject": str(m.get("subject", "user"))[:80],
+        "entities": [e.lower() for e in m.get("entities", []) if isinstance(e, str)][:20],
+        "confidence": conf,
+        "is_correction_of": m.get("is_correction_of"),
+        "temporal": m.get("temporal", "current"),
+    }
+
+
+def extract_memories(
+    turn_id: str,
+    user_id: Optional[str],
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    timestamp: str,
+) -> List[Dict[str, Any]]:
+    """
+    Run extraction and persist memories. Returns the list of stored memory dicts
+    (with their assigned ids) so the caller can embed them.
+    """
+    if not user_id:
+        return []  # we only store memories scoped to a user
+
+    conversation = _format_conversation(messages)
+    if not conversation.strip():
+        return []
+
+    raw_memories = _call_extractor(conversation)
+    valid = [v for v in (_validate_memory(m) for m in raw_memories) if v]
+
+    if not valid:
+        return []
+
+    stored = []
     conn = get_db()
     now = datetime.utcnow().isoformat()
 
-    for item in extracted:
-        memory_type = item.get("type", "fact")
-        key = item.get("key", "unknown")
-        value = item.get("value", "")
-        confidence = item.get("confidence", 1.0)
-
-        if not value:
-            continue
-
-        # Check if we already have an active memory with this key for this user
-        existing = conn.execute("""
-            SELECT id, value FROM memories
-            WHERE user_id = ? AND key = ? AND active = 1
-        """, (user_id, key)).fetchone()
-
-        if existing:
-            # Mark old memory as superseded
-            conn.execute("""
-                UPDATE memories SET active = 0, updated_at = ?
-                WHERE id = ?
-            """, (now, existing["id"]))
-            supersedes_id = existing["id"]
-            print(f"📝 Superseding old memory: '{existing['value']}' → '{value}'")
-        else:
-            supersedes_id = None
-
-        # Insert the new memory
+    for mem in valid:
+        # Subject filter: we only store user-subject memories in the main table.
+        # Other-subject memories are stored too but marked, so they don't pollute
+        # "stable user facts" priority in /recall.
         memory_id = str(uuid.uuid4())
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO memories
             (id, user_id, type, key, value, confidence, source_session,
-             source_turn, created_at, updated_at, supersedes, active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """, (memory_id, user_id, memory_type, key, value, confidence,
-              session_id, turn_id, now, now, supersedes_id))
+             source_turn, created_at, updated_at, supersedes, active,
+             subject, entities, temporal, is_correction_of)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)
+            """,
+            (
+                memory_id, user_id, mem["type"], mem["key"], mem["value"],
+                mem["confidence"], session_id, turn_id, now, now,
+                mem["subject"], json.dumps(mem["entities"]),
+                mem["temporal"], mem["is_correction_of"],
+            ),
+        )
+        stored.append({**mem, "id": memory_id})
 
     conn.commit()
     conn.close()
-    print(f"✅ Extracted {len(extracted)} memories for user {user_id}")
+    print(f"✅ Extracted {len(stored)} memories for user {user_id}")
+    return stored
