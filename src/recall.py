@@ -80,8 +80,8 @@ def recall(query: str, session_id: str, user_id: str, max_tokens: int) -> Tuple[
     from .retrieval import hybrid_search
     from .database import get_db
 
-    if not user_id:
-        return "", []
+    # Resolve memory scope: user-level if user_id provided, session-level otherwise
+    scope_id = user_id if user_id else f"session:{session_id}"
 
     # ── Step 1: Rewrite query ──
     try:
@@ -89,18 +89,18 @@ def recall(query: str, session_id: str, user_id: str, max_tokens: int) -> Tuple[
         rw = rewrite_query(query)
         search_query = rw["rewritten"]
         is_multihop = rw["is_multihop"]
-        print(f"🔍 '{query}' → '{search_query}' (multihop={is_multihop})")
+        print(f" '{query}' → '{search_query}' (multihop={is_multihop})")
     except Exception as e:
-        print(f"⚠️  Query rewrite failed, using original: {e}")
+        print(f" Query rewrite failed, using original: {e}")
         search_query = query
         is_multihop = False
         rw = {"is_multihop": False, "asked_dimension": "other"}
 
     # ── Step 2: First-pass hybrid retrieval ──
     try:
-        candidates = hybrid_search(user_id, search_query, top_n=20)
+        candidates = hybrid_search(scope_id, search_query, top_n=20)
     except Exception as e:
-        print(f"⚠️  Hybrid search failed: {e}")
+        print(f"  Hybrid search failed: {e}")
         candidates = []
 
     # ── Step 3: Multi-hop expansion ──
@@ -108,16 +108,16 @@ def recall(query: str, session_id: str, user_id: str, max_tokens: int) -> Tuple[
         try:
             from .query_processing import multihop_expand
             extras = multihop_expand(
-                user_id=user_id,
+                user_id=scope_id,
                 rewrite_meta=rw,
                 first_pass_results=candidates,
                 hybrid_search_fn=hybrid_search,
                 top_n=10,
             )
             candidates = candidates + extras
-            print(f"🔀 Added {len(extras)} multi-hop candidates")
+            print(f" Added {len(extras)} multi-hop candidates")
         except Exception as e:
-            print(f"⚠️  Multi-hop failed: {e}")
+            print(f" Multi-hop failed: {e}")
 
     # ── Step 4: Priority scoring ──
     for c in candidates:
@@ -132,7 +132,7 @@ def recall(query: str, session_id: str, user_id: str, max_tokens: int) -> Tuple[
             from .reranking import rerank
             candidates = rerank(query, candidates[:20], top_n=15)
         except Exception as e:
-            print(f"⚠️  Reranker failed, skipping: {e}")
+            print(f" Reranker failed, skipping: {e}")
 
     # ── Step 6: Get recent session turns ──
     conn = get_db()

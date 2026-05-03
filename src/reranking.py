@@ -7,9 +7,15 @@ Falls back to original order on any error.
 import json
 from typing import List, Dict, Any
 from openai import OpenAI
+import os
 
-client = OpenAI()
 MODEL = "gpt-4o-mini"
+
+
+def get_client():
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    return OpenAI()
 
 RERANK_PROMPT = """You rerank memory candidates for relevance to a query.
 
@@ -33,8 +39,12 @@ Score every candidate. Return ONLY JSON."""
 def rerank(query: str, candidates: List[Dict[str, Any]], top_n: int = 10) -> List[Dict[str, Any]]:
     if not candidates:
         return []
-    if len(candidates) == 1:
+if len(candidates) == 1:
         return candidates
+
+    client = get_client()
+    if client is None:
+        return candidates[:top_n]
 
     listing = "\n".join(
         f"{i}. [{c.get('type','?')}/{c.get('key','?')}] {c['value'][:200]}"
@@ -64,5 +74,5 @@ def rerank(query: str, candidates: List[Dict[str, Any]], top_n: int = 10) -> Lis
         return candidates[:top_n]
 
     except Exception as e:
-        print(f"⚠️  Reranker failed, falling back: {e}")
+        print(f" Reranker failed, falling back: {e}")
         return candidates[:top_n]

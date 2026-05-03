@@ -55,7 +55,7 @@ async def http_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unexpected_handler(request: Request, exc: Exception):
-    print(f"💥 Unexpected error on {request.url.path}: {type(exc).__name__}: {exc}")
+    print(f"Unexpected error on {request.url.path}: {type(exc).__name__}: {exc}")
     return JSONResponse(
         status_code=500,
         content={"error": "internal_error", "detail": "an unexpected error occurred"},
@@ -121,7 +121,7 @@ def ingest_turn(req: TurnRequest, _: bool = Depends(check_auth)):
         try:
             store_embedding(turn_id, "turn", turn_text)
         except Exception as e:
-            print(f"⚠️  Turn embedding failed: {e}")
+            print(f" Turn embedding failed: {e}")
 
     # Extract memories
     try:
@@ -133,7 +133,7 @@ def ingest_turn(req: TurnRequest, _: bool = Depends(check_auth)):
             timestamp=req.timestamp,
         )
     except Exception as e:
-        print(f"⚠️  Extraction failed (turn still saved): {e}")
+        print(f" Extraction failed (turn still saved): {e}")
         stored_memories = []
 
     # Embed each extracted memory
@@ -143,7 +143,7 @@ def ingest_turn(req: TurnRequest, _: bool = Depends(check_auth)):
                 store_embedding(mem["id"], "memory", mem["value"])
                 print(f"📎 Embedded memory: {mem['key']} = {mem['value'][:50]}")
         except Exception as e:
-            print(f"⚠️  Memory embedding failed: {e}")
+            print(f"  Memory embedding failed: {e}")
 
     return {"id": turn_id}
 
@@ -163,7 +163,7 @@ def recall_context(req: RecallRequest, _: bool = Depends(check_auth)):
         )
         return {"context": context, "citations": citations}
     except Exception as e:
-        print(f"⚠️  Recall error: {e}")
+        print(f" Recall error: {e}")
         return {"context": "", "citations": []}
 
 
@@ -173,42 +173,64 @@ def recall_context(req: RecallRequest, _: bool = Depends(check_auth)):
 
 @app.post("/search")
 def search(req: SearchRequest, _: bool = Depends(check_auth)):
+    """Search returns both raw turns AND structured memories, ranked by similarity."""
     conn = get_db()
     try:
-        rows = conn.execute(
+        turn_rows = conn.execute(
             """SELECT e.source_id, e.content, e.embedding,
-                      t.session_id, t.timestamp, t.metadata
+                      t.session_id, t.timestamp, t.metadata,
+                      'turn' AS kind
                FROM embeddings e
                JOIN turns t ON t.id = e.source_id
                WHERE e.source_type = 'turn'
                AND (? IS NULL OR t.session_id = ?)
-               AND (? IS NULL OR t.user_id = ?)
-               ORDER BY t.timestamp DESC""",
+               AND (? IS NULL OR t.user_id = ?)""",
             (req.session_id, req.session_id, req.user_id, req.user_id),
         ).fetchall()
+
+        if req.user_id:
+            mem_rows = conn.execute(
+                """SELECT e.source_id, e.content, e.embedding,
+                          m.source_session AS session_id,
+                          m.updated_at AS timestamp,
+                          '{}' AS metadata,
+                          'memory' AS kind
+                   FROM embeddings e
+                   JOIN memories m ON m.id = e.source_id
+                   WHERE e.source_type = 'memory'
+                   AND m.user_id = ?
+                   AND m.active = 1""",
+                (req.user_id,),
+            ).fetchall()
+        else:
+            mem_rows = []
+
+        all_rows = list(turn_rows) + list(mem_rows)
     finally:
         conn.close()
 
-    if not rows:
+    if not all_rows:
         return {"results": []}
 
     try:
         query_emb = get_embedding(req.query)
     except Exception as e:
-        print(f"⚠️  Search embedding failed: {e}")
+        print(f" Search embedding failed: {e}")
         return {"results": []}
 
     scored = []
-    for row in rows:
+    for row in all_rows:
         try:
             emb = json.loads(row["embedding"])
             score = cosine(query_emb, emb)
+            metadata = json.loads(row["metadata"] or "{}") if row["metadata"] else {}
+            metadata["_kind"] = row["kind"]
             scored.append({
                 "content": row["content"],
                 "score": score,
-                "session_id": row["session_id"],
+                "session_id": row["session_id"] or "",
                 "timestamp": row["timestamp"],
-                "metadata": json.loads(row["metadata"] or "{}"),
+                "metadata": metadata,
             })
         except Exception:
             continue
@@ -248,18 +270,23 @@ def delete_session(session_id: str, _: bool = Depends(check_auth)):
         raise HTTPException(status_code=400, detail="session_id too long")
     conn = get_db()
     try:
-        turns = conn.execute(
-            "SELECT id FROM turns WHERE session_id = ?", (session_id,)
-        ).fetchall()
-        turn_ids = [t["id"] for t in turns]
+        turn_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM turns WHERE session_id = ?", (session_id,)).fetchall()]
+        mem_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM memories WHERE source_session = ?", (session_id,)).fetchall()]
+
         conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM memories WHERE source_session = ?", (session_id,))
+
         for tid in turn_ids:
             conn.execute("DELETE FROM embeddings WHERE source_id = ?", (tid,))
+        for mid in mem_ids:
+            conn.execute("DELETE FROM embeddings WHERE source_id = ?", (mid,))
+            conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
+
         conn.commit()
     finally:
         conn.close()
-
 
 # ─────────────────────────────────────────────
 # DELETE /users/{user_id}

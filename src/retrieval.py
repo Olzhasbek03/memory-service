@@ -7,19 +7,26 @@ from typing import List, Dict, Any
 import numpy as np
 from openai import OpenAI
 from .database import get_db
+import os
 
-client = OpenAI()
 EMBEDDING_MODEL = "text-embedding-3-small"
 RRF_K = 60
 
+
+def get_client():
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    return OpenAI()
 
 def get_embedding(text: str) -> List[float]:
     text = text[:8000] if text else ""
     if not text.strip():
         return [0.0] * 1536
+    client = get_client()
+    if client is None:
+        return [0.0] * 1536
     resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
     return resp.data[0].embedding
-
 
 def cosine(a: List[float], b: List[float]) -> float:
     a, b = np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)
@@ -89,7 +96,7 @@ def bm25_search(user_id: str, query: str, top_n: int = 30) -> List[Dict[str, Any
             (user_id, safe, top_n),
         ).fetchall()
     except sqlite3.OperationalError as e:
-        print(f"⚠️  BM25 search error: {e}")
+        print(f" BM25 search error: {e}")
         rows = []
     conn.close()
     return [{**dict(r), "bm25_score": -r["bm25_score"]} for r in rows]

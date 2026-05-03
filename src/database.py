@@ -6,10 +6,11 @@ from datetime import datetime
 DB_PATH = os.environ.get("DB_PATH", "/data/memory.db")
 
 def get_db():
-    """Get a database connection."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # lets us access columns by name
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 def init_db():
@@ -92,7 +93,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("✅ Database initialized")
+    print(" Database initialized")
 
 
 def index_memory_for_fts(conn, memory_id: str, user_id: str, value: str, entities: list):

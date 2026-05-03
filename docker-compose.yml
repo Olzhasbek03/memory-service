@@ -5,8 +5,10 @@ services:
       - "8080:8080"
     volumes:
       - memory-data:/data
-    env_file:
-      - .env
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MEMORY_AUTH_TOKEN: ${MEMORY_AUTH_TOKEN:-}
+      DB_PATH: /data/memory.db
     restart: unless-stopped
 
 volumes:

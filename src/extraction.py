@@ -1,3 +1,4 @@
+import os
 import json
 import uuid
 from datetime import datetime
@@ -6,8 +7,14 @@ from openai import OpenAI
 from .database import get_db, index_memory_for_fts
 from .evolution import resolve_evolution, apply_evolution
 
-client = OpenAI()
 EXTRACTION_MODEL = "gpt-4o-mini"
+
+
+def get_client():
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    return OpenAI()
+
 
 TOPIC_NORMALIZATION = {
     "job": "employment", "employer": "employment", "work": "employment",
@@ -83,6 +90,10 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
 
 
 def _call_extractor(conversation: str) -> List[Dict[str, Any]]:
+    client = get_client()
+    if client is None:
+        print(" No OPENAI_API_KEY — skipping extraction")
+        return []
     try:
         response = client.chat.completions.create(
             model=EXTRACTION_MODEL,
@@ -98,7 +109,7 @@ def _call_extractor(conversation: str) -> List[Dict[str, Any]]:
         memories = parsed.get("memories", [])
         return memories if isinstance(memories, list) else []
     except Exception as e:
-        print(f"⚠️  Extraction LLM call failed: {e}")
+        print(f" Extraction LLM call failed: {e}")
         return []
 
 
@@ -133,8 +144,9 @@ def extract_memories(
     messages: List[Dict[str, Any]],
     timestamp: str,
 ) -> List[Dict[str, Any]]:
-    if not user_id:
-        return []
+    # When user_id is None, scope memories to this session only
+    # so per-session memory still works without a user identifier.
+    scope_id = user_id if user_id else f"session:{session_id}"
 
     conversation = _format_conversation(messages)
     if not conversation.strip():
@@ -151,8 +163,7 @@ def extract_memories(
     now = datetime.utcnow().isoformat()
 
     for mem in valid:
-        # ── Check evolution: should we insert, supersede, or skip? ──
-        decision = resolve_evolution(mem, user_id)
+        decision = resolve_evolution(mem, scope_id)
         memory_id = str(uuid.uuid4())
 
         should_insert = apply_evolution(conn, mem, memory_id, decision, now)
@@ -168,18 +179,17 @@ def extract_memories(
                 subject, entities, temporal, is_correction_of)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
             (
-                memory_id, user_id, mem["type"], mem["key"], mem["value"],
+                memory_id, scope_id, mem["type"], mem["key"], mem["value"],
                 mem["confidence"], session_id, turn_id, now, now,
                 supersedes_val, mem["subject"], json.dumps(mem["entities"]),
                 mem["temporal"], mem["is_correction_of"],
             ),
         )
 
-        # Index for BM25 search
-        index_memory_for_fts(conn, memory_id, user_id, mem["value"], mem["entities"])
+        index_memory_for_fts(conn, memory_id, scope_id, mem["value"], mem["entities"])
         stored.append({**mem, "id": memory_id})
 
     conn.commit()
     conn.close()
-    print(f"✅ Extracted {len(stored)} memories for user {user_id}")
+    print(f" Extracted {len(stored)} memories for scope {scope_id}")
     return stored

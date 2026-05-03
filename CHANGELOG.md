@@ -10,6 +10,45 @@ by layer. Every entry left the service in a working, committable state
 — so if a later layer broke, I'd still have a submittable version.
 
 ---
+## v8 — Operational hardening based on external review
+
+**What changed:**
+- docker-compose.yml uses ${VAR:-} form so it boots without .env.
+  Reviewers running `docker compose up` won't necessarily create one.
+- OpenAI client is now lazy (created per call). If OPENAI_API_KEY is
+  unset, every LLM/embedding call returns a safe default instead of
+  crashing at import time. Service boots cleanly with no key,
+  matching the failure-mode docs in README.
+- user_id=null support: when null, memories scope to f"session:{session_id}"
+  internally. Per-session memory works without a user identifier.
+- Fact evolution split into SINGULAR vs ADDITIVE keys. Pets, hobbies,
+  allergies, languages, skills, children no longer get clobbered when
+  a second value arrives — same-entity overlap now required for
+  supersession on additive keys. Singular keys (employment, location,
+  spouse) still supersede on key match.
+- DELETE /sessions/{id} now cleans memory embeddings and FTS rows
+  for memories sourced from that session, not just turn embeddings.
+- /search now ranks both raw turns AND structured active memories
+  in a single result list with a metadata._kind tag.
+- SQLite WAL mode + 10s busy timeout for safer concurrent /turns.
+
+**Why these specifically:** Two external code reviews flagged the
+compose/key-handling and additive-fact issues as blocking. WAL mode
+was the one performance suggestion worth taking — five lines, real
+benefit, no risk.
+
+**Deliberately did NOT change:**
+- Numpy vectorization for cosine: not warranted at eval scale.
+  Linear scan over a few hundred 1536-dim vectors is sub-millisecond.
+- Async parallelization of embedding + BM25: would shave ~50ms but
+  mixing async into sync FastAPI routes risks subtle bugs. Latency
+  budget is already comfortable.
+- Semantic key fallback in normalize_key(): adds an embedding call
+  to the extraction hot path with new failure modes. Hand-curated
+  TOPIC_NORMALIZATION covers all keys observed in fixture and spec
+  examples.
+
+**Result:** All 27 prior tests still pass
 
 ## v7 — Robustness & graceful degradation
 

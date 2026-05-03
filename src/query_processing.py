@@ -13,8 +13,15 @@ import json
 from typing import List, Dict, Any
 from openai import OpenAI
 
-client = OpenAI()
+import os
+
 MODEL = "gpt-4o-mini"
+
+
+def get_client():
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    return OpenAI()
 
 REWRITE_PROMPT = """You optimize queries for a personal-memory retrieval system.
 
@@ -51,6 +58,10 @@ Return ONLY the JSON object."""
 
 
 def rewrite_query(query: str) -> Dict[str, Any]:
+    client = get_client()
+    if client is None:
+        return {"rewritten": query, "keywords": [], "is_multihop": False,
+                "asked_dimension": "other", "anchor_dimension": None}
     try:
         resp = client.chat.completions.create(
             model=MODEL,
@@ -70,7 +81,7 @@ def rewrite_query(query: str) -> Dict[str, Any]:
             "anchor_dimension":  out.get("anchor_dimension"),
         }
     except Exception as e:
-        print(f"⚠️  rewrite_query failed: {e}")
+        print(f" rewrite_query failed: {e}")
         return {
             "rewritten": query, "keywords": [],
             "is_multihop": False, "asked_dimension": "other",
@@ -137,8 +148,8 @@ def multihop_expand(
     boost = DIMENSION_BOOSTERS.get(asked, "")
     second_query = f"{' '.join(anchor_entities)} {boost}".strip()
 
-    print(f"🔀 Multi-hop second pass: anchors={anchor_entities} asked={asked}")
-    print(f"🔀 Second query: '{second_query}'")
+    print(f" Multi-hop second pass: anchors={anchor_entities} asked={asked}")
+    print(f" Second query: '{second_query}'")
 
     second = hybrid_search_fn(user_id, second_query, top_n=top_n)
 
