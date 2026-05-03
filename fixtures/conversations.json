@@ -1,0 +1,153 @@
+{
+  "scenarios": [
+    {
+      "name": "single_user_basic_facts",
+      "user_id": "fixture-alice",
+      "turns": [
+        {
+          "session_id": "alice-s1",
+          "timestamp": "2025-01-10T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "Hi! I'm Alice, I'm a software engineer at Stripe in San Francisco."},
+            {"role": "assistant", "content": "Nice to meet you, Alice!"}
+          ]
+        },
+        {
+          "session_id": "alice-s2",
+          "timestamp": "2025-01-15T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I have a golden retriever named Biscuit, she just turned 5."},
+            {"role": "assistant", "content": "Biscuit sounds wonderful!"}
+          ]
+        },
+        {
+          "session_id": "alice-s3",
+          "timestamp": "2025-01-20T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I'm vegetarian and allergic to shellfish."},
+            {"role": "assistant", "content": "Got it, I'll keep that in mind."}
+          ]
+        }
+      ],
+      "probes": [
+        {
+          "query": "Where does Alice work?",
+          "session_id": "alice-probe-1",
+          "expected_keywords": ["Stripe"]
+        },
+        {
+          "query": "What's the user's pet's name?",
+          "session_id": "alice-probe-2",
+          "expected_keywords": ["Biscuit"]
+        },
+        {
+          "query": "Any dietary restrictions?",
+          "session_id": "alice-probe-3",
+          "expected_keywords": ["vegetarian", "shellfish"]
+        }
+      ]
+    },
+    {
+      "name": "fact_evolution_employment",
+      "user_id": "fixture-bob",
+      "turns": [
+        {
+          "session_id": "bob-s1",
+          "timestamp": "2025-01-15T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I work at Stripe as a software engineer."},
+            {"role": "assistant", "content": "Cool!"}
+          ]
+        },
+        {
+          "session_id": "bob-s2",
+          "timestamp": "2025-04-01T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I just started a new job at Notion as a PM."},
+            {"role": "assistant", "content": "Congrats!"}
+          ]
+        }
+      ],
+      "probes": [
+        {
+          "query": "Where does Bob work now?",
+          "session_id": "bob-probe-1",
+          "expected_keywords": ["Notion"],
+          "must_not_contain": ["currently at Stripe", "works at Stripe"]
+        }
+      ]
+    },
+    {
+      "name": "multihop_pet_to_location",
+      "user_id": "fixture-carol",
+      "turns": [
+        {
+          "session_id": "carol-s1",
+          "timestamp": "2025-02-01T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "My dog Biscuit is a 5-year-old golden retriever."},
+            {"role": "assistant", "content": "Biscuit sounds great!"}
+          ]
+        },
+        {
+          "session_id": "carol-s2",
+          "timestamp": "2025-02-15T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I moved to Berlin from NYC three months ago."},
+            {"role": "assistant", "content": "How is Berlin?"}
+          ]
+        }
+      ],
+      "probes": [
+        {
+          "query": "What city does the user with the dog Biscuit live in?",
+          "session_id": "carol-probe-1",
+          "expected_keywords": ["Berlin"]
+        }
+      ]
+    },
+    {
+      "name": "noise_resistance",
+      "user_id": "fixture-dan",
+      "turns": [
+        {
+          "session_id": "dan-s1",
+          "timestamp": "2025-03-01T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I love coffee and run marathons."},
+            {"role": "assistant", "content": "Nice!"}
+          ]
+        }
+      ],
+      "probes": [
+        {
+          "query": "What car does the user drive?",
+          "session_id": "dan-probe-1",
+          "expected_keywords": [],
+          "must_not_contain": ["Tesla", "Toyota", "Ford", "drives"]
+        }
+      ]
+    },
+    {
+      "name": "cross_session_isolation",
+      "user_id": "fixture-eve",
+      "turns": [
+        {
+          "session_id": "eve-s1",
+          "timestamp": "2025-03-10T10:00:00Z",
+          "messages": [
+            {"role": "user", "content": "I'm learning Spanish and live in Madrid."},
+            {"role": "assistant", "content": "Buena suerte!"}
+          ]
+        }
+      ],
+      "probes": [
+        {
+          "query": "Where does the user live?",
+          "session_id": "eve-probe-different-session",
+          "expected_keywords": ["Madrid"]
+        }
+      ]
+    }
+  ]
+}
