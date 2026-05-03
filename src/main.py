@@ -14,7 +14,8 @@ from .models import (
     RecallResponse, SearchResponse
 )
 from .extraction import extract_memories
-from .recall import recall, store_embedding, get_embedding, cosine_similarity
+from .recall import recall, store_embedding, cosine_similarity
+from .retrieval import get_embedding
 import numpy as np
 
 @asynccontextmanager
@@ -54,16 +55,12 @@ def ingest_turn(req: TurnRequest):
     conn.commit()
     conn.close()
 
-    # Build a text summary of this turn for embedding
-    turn_text = " ".join([
-        f"{m.role}: {m.content}" for m in req.messages
-    ])
-
-    # Store embedding for the turn
+    # Embed the raw turn text
+    turn_text = " ".join([f"{m.role}: {m.content}" for m in req.messages])
     store_embedding(turn_id, "turn", turn_text)
 
-    # Extract structured memories using OpenAI
-    extract_memories(
+    # Extract memories — returns list of stored memory dicts with their ids
+    stored_memories = extract_memories(
         turn_id=turn_id,
         user_id=req.user_id,
         session_id=req.session_id,
@@ -72,15 +69,11 @@ def ingest_turn(req: TurnRequest):
     )
 
     # Store embeddings for each extracted memory
-    conn = get_db()
-    new_memories = conn.execute("""
-        SELECT id, value FROM memories
-        WHERE source_turn = ? AND active = 1
-    """, (turn_id,)).fetchall()
-    conn.close()
-
-    for mem in new_memories:
-        store_embedding(mem["id"], "memory", mem["value"])
+    # This is critical — without this, recall finds nothing
+    for mem in stored_memories:
+        if mem.get("id") and mem.get("value"):
+            store_embedding(mem["id"], "memory", mem["value"])
+            print(f"📎 Embedded memory: {mem['key']} = {mem['value'][:50]}")
 
     return {"id": turn_id}
 
