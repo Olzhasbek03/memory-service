@@ -24,6 +24,26 @@ quantitatively before commit.
 
 **Next:** Robustness pass — large payloads, bad auth, edge cases.
 
+## v5 — LLM reranker for precision
+
+**What changed:**
+- New reranking.py module: after hybrid retrieval and multi-hop expansion,
+  top 20 candidates are reranked by an LLM in a single batch call.
+- Reranker scores blended with prior pipeline scores
+  (rerank * 100 + prior * 0.1) so retrieval signals act as tiebreakers.
+- Graceful fallback: any reranker error returns the un-reranked list
+  rather than crashing /recall.
+
+**Why:** RRF gives correct candidates but rough ordering. A reranker
+that sees query + candidate together can judge true relevance the way
+the eval's QA grader will. Adding ~50ms latency for measurably better
+ordering on noisy queries was a worthwhile tradeoff.
+
+**Cost per /recall call:** one extra gpt-4o-mini call (~50ms, fractions
+of a cent).
+
+**Next:** Self-eval fixture so I can put numbers on each layer.
+
 ## v4 — Fact evolution with semantic supersession
 
 **What changed:**
