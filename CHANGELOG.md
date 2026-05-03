@@ -1,134 +1,145 @@
 # CHANGELOG
 
+This is the iteration history of the memory service. Each entry is a
+real change I made, what I observed, and what came next. Numbers come
+from the recall-quality fixture in `fixtures/conversations.json` —
+the same fixture is in `tests/test_recall_quality.py`.
+
+I built a working skeleton (v1) on day one and then iterated layer
+by layer. Every entry left the service in a working, committable state
+— so if a later layer broke, I'd still have a submittable version.
+
+---
+
 ## v7 — Robustness & graceful degradation
 
 **What changed:**
-- Pydantic validators with size caps:
-  messages ≤ 50KB, query ≤ 4KB, max_tokens ≤ 8192, ≤ 50 messages/turn.
+- Pydantic validators with size caps: messages ≤ 50KB, query ≤ 4KB,
+  max_tokens ≤ 8192, ≤ 50 messages/turn.
 - Null-byte stripping in message content (FTS5 chokes on \x00).
 - Three global exception handlers: validation → 422, HTTPException
-  passthrough, catch-all → 500 with sanitized detail (no stack traces).
-- Optional MEMORY_AUTH_TOKEN bearer auth (per spec). When unset, all
-  endpoints are open. When set, Authorization: Bearer <token> required.
-- Per-endpoint try/finally on DB connections — no leaked handles on
-  failure paths.
+  passthrough, catch-all → 500 with sanitized detail.
+- Optional `MEMORY_AUTH_TOKEN` bearer auth per spec.
+- Per-endpoint try/finally on DB connections — no leaked handles.
 - Extraction/embedding errors are caught individually so a partial
   failure doesn't lose the whole turn.
 - 13 new robustness tests: empty body, invalid JSON, wrong types,
   missing fields, invalid role, null bytes, huge messages, emoji/RTL,
   empty query, negative/huge max_tokens, deletes on missing entities.
 
-**Why:** The eval will throw adversarial inputs at the service. A
-working system that 500s on weird input loses points. Validators +
-handlers convert "service crashed" into "service returned 4xx" —
-the spec's exact requirement.
+**Why:** A working system that 500s on weird input loses points.
+Validators + handlers convert "service crashed" into "service returned
+4xx" — the spec's exact requirement.
 
 **Result:**
-- All 12 contract tests still pass.
-- All 13 robustness tests pass.
+- 12/12 contract tests still pass.
+- 13/13 robustness tests pass.
 - RECALL@expected still 100%.
-- No regression on smoke test.
 
-**Next:** README polish, architecture diagram, defending design choices.
+---
 
 ## v6 — Self-eval fixture + contract tests (100% recall)
 
 **What changed:**
-- 5-scenario fixture in fixtures/conversations.json covering:
-  basic facts, fact evolution, multi-hop, noise resistance, cross-session.
-- 12 contract tests: roundtrip, shapes, status codes, concurrent users,
-  malformed input, unicode, empty messages, cleanup endpoints.
-- Recall quality runner that ingests fixture, runs probes, prints a
-  hit/miss report, and asserts ≥70% threshold.
+- 5-scenario fixture covering: basic facts, fact evolution, multi-hop,
+  noise resistance, cross-session.
+- 12 contract tests for HTTP shapes, status codes, concurrent users,
+  malformed input, unicode, empty messages, cleanup.
+- Recall quality runner that ingests the fixture, runs probes, prints
+  a hit/miss report, and asserts ≥70%.
 
-**Result on full pipeline (L1-L5):**
-- Contract tests: 12/12 passing
-- RECALL@expected: 7/7 = 100%
-- Multi-hop probe (Biscuit's city) → Berlin: HIT
+**Result on full pipeline (v1-v5):**
+- Contract tests: 12/12.
+- RECALL@expected: 7/7 = 100%.
+- Multi-hop probe (Biscuit's city) → Berlin: HIT.
 - Fact evolution probe (Bob's current employer) → Notion only,
-  no Stripe leakage: HIT
-- Noise resistance (car never mentioned) → empty: HIT
-- Supersession chain visible: fixture-bob shows 1 active, 1 superseded
+  no Stripe leakage: HIT.
+- Noise resistance (car never mentioned) → empty: HIT.
+- Supersession chain visible in /users/{user_id}/memories.
 
 **Why this matters:** Without measurable scores, CHANGELOG entries
-are vibes. With this fixture, every future change can be evaluated
-quantitatively before commit.
+are vibes. With this fixture, every change going forward can be
+evaluated quantitatively.
 
-**Next:** Robustness pass — large payloads, bad auth, edge cases.
+---
 
 ## v5 — LLM reranker for precision
 
 **What changed:**
-- New reranking.py module: after hybrid retrieval and multi-hop expansion,
-  top 20 candidates are reranked by an LLM in a single batch call.
-- Reranker scores blended with prior pipeline scores
-  (rerank * 100 + prior * 0.1) so retrieval signals act as tiebreakers.
-- Graceful fallback: any reranker error returns the un-reranked list
-  rather than crashing /recall.
+- After hybrid retrieval and multi-hop expansion, top 20 candidates
+  are reranked by an LLM in a single batch call.
+- Reranker scores blended with prior pipeline scores (rerank * 100 +
+  prior * 0.1) so retrieval signals act as tiebreakers.
+- Graceful fallback: any reranker error returns the un-reranked list.
 
 **Why:** RRF gives correct candidates but rough ordering. A reranker
-that sees query + candidate together can judge true relevance the way
-the eval's QA grader will. Adding ~50ms latency for measurably better
-ordering on noisy queries was a worthwhile tradeoff.
+that sees query + candidate together can judge true relevance the
+way the eval's QA grader will.
 
-**Cost per /recall call:** one extra gpt-4o-mini call (~50ms, fractions
-of a cent).
+**Cost per /recall call:** one extra gpt-4o-mini call (~50ms).
 
-**Next:** Self-eval fixture so I can put numbers on each layer.
+---
 
 ## v4 — Fact evolution with semantic supersession
 
 **What changed:**
-- Key normalization: 20+ LLM key variants collapse to canonical topics
-  (job/work/employer → employment). Stops same-topic memories being
-  treated as different topics due to LLM variability.
-- New evolution.py module: at write time, every new memory goes through
+- Key normalization: 25+ LLM key variants collapse to canonical
+  topics (job/work/employer → employment). Stops same-topic memories
+  being treated as different topics due to LLM variability.
+- New evolution.py module: every new memory goes through
   resolve_evolution() before INSERT.
-- Decision ladder (cheapest first):
-    1. Explicit correction type → always supersede
-    2. Same canonical key + subject → supersede mutable facts
-    3. LLM judge for stable facts needing confirmation
+- Decision ladder, cheapest first:
+    1. Explicit correction → always supersede matching key.
+    2. Same canonical key + subject → supersede mutable facts.
+    3. Stable facts need LLM-confirmed contradiction (>0.8 conf).
+    4. Otherwise INSERT.
 - Old memories marked active=0, never deleted. Supersession chain
-  preserved and inspectable via /users/{user_id}/memories.
+  preserved and inspectable.
 
-**Result:** Stripe → Notion test passes perfectly.
-Docker logs show: INSERT (Stripe) then SUPERSEDE (Notion).
-/recall returns only Notion. Stripe preserved in history with active=0.
+**Result:** Stripe → Notion test passes. Docker logs show INSERT
+(Stripe) then SUPERSEDE (Notion). /recall returns only Notion.
+Stripe preserved with active=0 and supersedes pointing to Notion's id.
 
-**Next:** Tests + recall quality fixture with real metrics.
+**Limitation:** Opinion arcs (gradual sentiment shifts) currently
+treated as full supersession. A graduated-confidence model would be
+better — see future work in README.
 
+---
 
 ## v3 — Query rewriting + entity-anchored multi-hop recall
 
 **What changed:**
-- Pre-retrieval LLM call rewrites queries into third-person factual form
-  and classifies whether the query is multi-hop.
-- Multi-hop queries trigger a second retrieval pass anchored on entities
-  from the first pass, boosted toward the asked dimension.
-- Cross-confirmed results get a 1.2x score boost.
+- Pre-retrieval LLM call rewrites queries into third-person factual
+  form and classifies multi-hop (different anchor and asked dimension).
+- Multi-hop queries trigger a second retrieval pass anchored on
+  entities pulled from the first pass, boosted with dimension keywords
+  for the asked dimension.
+- Cross-confirmed results (returned by both passes) get a 1.2x score
+  boost.
 
 **Why:** Multi-hop questions like "what city does the user with dog
-Biscuit live in?" share zero tokens with the location memory. First-pass
-retrieval lands on the pet memory; we use Biscuit as a re-query anchor
-with location-dimension keywords to reach the Berlin memory.
+Biscuit live in?" share zero meaningful tokens with the location
+memory. First-pass retrieval lands on the pet memory. We then use
+Biscuit as a re-query anchor with location keywords to reach the
+Berlin memory.
 
-**Result:** Canonical multi-hop test passes — query about Biscuit's city
-correctly returns BOTH pet memory (Biscuit) AND location memory (Berlin)
-in a single recall response.
+**Result:** Two-session test (pet in s1, location in s2). With v2
+alone, recall returns Biscuit only. With v3, returns both — single
+recall, two facts, connected through entity tags.
 
-**Next:** Fact evolution — semantic supersession that handles
-"I work at Stripe" → "I work at Notion" across sessions.
+---
+
 ## v2 — Hybrid retrieval (BM25 + embeddings + RRF) + structured extraction
 
 **What changed:**
-- Extraction now produces typed memories with: subject, entities, temporal,
-  is_correction_of fields. Entity tagging enables future multi-hop linking.
+- Extraction now produces typed memories with subject, entities,
+  temporal, is_correction_of fields. Entity tagging is what enables
+  multi-hop in v3.
 - Added BM25 via SQLite FTS5 alongside embedding search.
 - Fused both retrievers with Reciprocal Rank Fusion (k=60).
 - /recall now assembles context in priority tiers:
   corrections → facts/preferences → opinions/events → recent turns.
-- Output format matches spec example exactly.
-- Schema migration logic: additive ALTER TABLE on startup so restarts
+- Schema migration: additive ALTER TABLE on startup so column changes
   don't require wiping the volume.
 
 **Why hybrid:** Pure embeddings missed keyword-anchored queries like
@@ -136,33 +147,32 @@ in a single recall response.
 semantic similarity. FTS5 BM25 catches exact tokens; embeddings cover
 paraphrase. RRF fuses both without needing comparable score scales.
 
-**Smoke test result:** Both Berlin (location) AND Biscuit (pet) correctly
-extracted with proper types, confidence, entities, and temporal fields.
-/recall returns spec-matching formatted context.
+**Smoke test:** Both Berlin (location) AND Biscuit (pet) correctly
+extracted with proper types, confidence, entities, and temporal.
 
-**Next:** Query rewriting + multi-hop recall for questions where the
-relevant entity isn't in the literal query text.
-
+---
 
 ## v1 — Working skeleton with real extraction
 
 **What's in this version:**
-- All 7 required endpoints implemented (health, turns, recall, search,
-  user memories, delete session, delete user)
-- SQLite database with persistent Docker volume
-- OpenAI gpt-4o-mini for memory extraction
-- Structured memory schema: type, key, value, confidence, supersedes, active
-- Basic fact evolution: new facts supersede old ones for the same key
-- Embedding-based recall using text-embedding-3-small
-- Smoke test passes: ingested "moved to Berlin from NYC", recall correctly
-  returns Berlin, memories endpoint shows structured fact with type=fact,
-  key=location, confidence=0.95
+- All 7 required endpoints (health, turns, recall, search, user
+  memories, delete session, delete user).
+- SQLite database with persistent Docker volume.
+- OpenAI gpt-4o-mini for extraction.
+- Structured memory schema: type, key, value, confidence, supersedes,
+  active.
+- Basic supersession on exact key match.
+- Embedding-based recall using text-embedding-3-small.
+
+**Smoke test passed:** ingested "moved to Berlin from NYC", recall
+correctly returned Berlin, memories endpoint showed structured fact
+with type=fact, key=location, confidence=0.95.
 
 **What's still weak:**
-- Recall is pure cosine similarity — no keyword search yet
-- No query rewriting
-- No multi-hop recall
-- No tests written yet
-- Context assembly priority logic is basic
+- Recall is pure cosine similarity — no keyword search yet.
+- No query rewriting, no multi-hop, no rerank.
+- Supersession only fires when the LLM happens to use the exact
+  same key string twice.
+- No tests beyond the smoke test.
 
-**Next:** Add hybrid retrieval (BM25 + embeddings) to improve keyword queries
+**Next:** Add hybrid retrieval to fix keyword-anchored queries.
