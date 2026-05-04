@@ -122,7 +122,7 @@ The whole thing is one Python service (FastAPI + Uvicorn) with SQLite as the onl
 
 I picked SQLite for three reasons:
 
-1. **One file, real persistence.** A Docker named volume mounts to `/data/memory.db`. Restarts are invisible to clients — verified by a contract test.
+1. **One file, persistence.** A Docker named volume mounts to `/data/memory.db`. Restarts are invisible to clients — verified by a contract test.
 2. **FTS5 is built in.** I needed BM25 for hybrid retrieval (more on that below), and SQLite's FTS5 virtual table gives me BM25 in the same file as the canonical store. No separate inverted index, no two-system consistency problem. The memories table and the BM25 index can't drift apart because they share the same WAL.
 3. **It's small enough to defend.** A take-home is the wrong place to introduce Postgres + pgvector + Redis. SQLite handles a few concurrent sessions and tens of thousands of memories without breaking a sweat. If this grew past that I'd port to Postgres + pgvector, keep the same schema.
 
