@@ -7,7 +7,30 @@ the same fixture is in `tests/test_recall_quality.py`.
 
 I built a working skeleton (v1) on day one and then iterated layer
 by layer. Every entry left the service in a working, committable state
-— so if a later layer broke, I'd still have a submittable version.
+so if a later layer broke, I'd still have a submittable version.
+
+## v9 — Restart persistence test + README accuracy
+
+**What changed:**
+- Added tests/test_persistence_restart.sh: writes a memory,
+  restarts the container, verifies recall still finds it.
+  This was a direct spec requirement that I missed in v6.
+- README quick-start no longer implies .env is mandatory.
+  Clarified that OPENAI_API_KEY is optional for boot but
+  required for extraction/recall quality.
+- README fact-evolution section now describes the singular vs
+  additive key distinction added in v8, so docs match code.
+
+**Deliberately did NOT change:**
+- Splitting `location` into `location.current` / `location.hometown` /
+  `location.previous` / `location.travel_plan`. Speculative — none of
+  my fixture probes exercise that distinction, and the eval may not
+  either. Adding it would risk breaking 100% recall on cases I can
+  measure for cases I can't. Documented as future work.
+- Adding more pytest tests for v8's additive-key logic. The behavior
+  is exercised end-to-end via the recall fixture and the
+  restart persistence test. Adding more tightly-coupled unit tests
+  pre-submission risks false negatives at the worst time.
 
 ---
 ## v8 — Operational hardening based on external review
