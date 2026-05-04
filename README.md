@@ -122,11 +122,10 @@ The whole thing is one Python service (FastAPI + Uvicorn) with SQLite as the onl
 
 I picked SQLite for three reasons:
 
-1. **One file, persistence.** A Docker named volume mounts to `/data/memory.db`. Restarts are invisible to clients — verified by a contract test.
+1. **One file, persistence.** A Docker named volume mounts to `/data/memory.db`. Restarts are invisible to clients, verified by a contract test.
 2. **FTS5 is built in.** I needed BM25 for hybrid retrieval (more on that below), and SQLite's FTS5 virtual table gives me BM25 in the same file as the canonical store. No separate inverted index, no two-system consistency problem. The memories table and the BM25 index can't drift apart because they share the same WAL.
-3. **It's small enough to defend.** A take-home is the wrong place to introduce Postgres + pgvector + Redis. SQLite handles a few concurrent sessions and tens of thousands of memories without breaking a sweat. If this grew past that I'd port to Postgres + pgvector, keep the same schema.
 
-Embeddings are stored as JSON-serialized float arrays in a separate `embeddings` table. I don't use a real ANN index — at the scale this service is meant to handle (a few thousand memories per user max), a linear scan with cosine is fast enough and avoids the whole "rebuild the index after every insert" problem. If memory count grew large I'd add `sqlite-vss` or move embeddings to a proper vector store.
+Embeddings are stored as JSON-serialized float arrays in a separate `embeddings` table. I don't use a real ANN index, at the scale this service is meant to handle (a few thousand memories per user max), a linear scan with cosine is fast enough and avoids the whole "rebuild the index after every insert" problem. If memory count grew large I'd add `sqlite-vss` or move embeddings to a proper vector store.
 
 ---
 
@@ -149,7 +148,7 @@ Raw conversation turns become structured memories via one `gpt-4o-mini` call per
 
 Things I deliberately put in the extraction prompt:
 
-- **Few-shot examples** for the tricky cases — corrections, implicit facts ("walking Biscuit" → has dog Biscuit), and the no-extraction case ("hey thanks!" → empty list).
+- **Few-shot examples** for the tricky cases corrections, implicit facts ("walking Biscuit" → has dog Biscuit), and the no-extraction case ("hey thanks!" → empty list).
 - **Granularity rules.** "I love Python and Go" must split into two preference memories. "Has a golden retriever named Biscuit, age 5" must NOT split — those details are inseparable.
 - **Subject distinction.** Facts about the user vs facts about people the user mentioned. Stops "my wife works at Stripe" from being stored as a user fact.
 - **Temporal classification.** Stable facts (allergies, hometown) get extra protection during supersession.
@@ -183,7 +182,7 @@ RRF_score(doc) = Σ 1 / (k + rank_in_each_list)        # k = 60
 
 This is the literature default from Cormack et al. 2009. It uses ranks not scores, so the scale incompatibility doesn't matter. A document ranked top-1 by both retrievers wins. A document only one retriever found ranks lower.
 
-Why hybrid is non-negotiable: pure embeddings miss "what's Biscuit's name?" because "Biscuit" carries weak signal in vibe-space — the question is generically about pets. Pure BM25 misses "where does she work?" because no memory contains the word "work." You need both.
+Why hybrid is non-negotiable: pure embeddings miss "what's Biscuit's name?" because "Biscuit" carries weak signal in vibe-space the question is generically about pets. Pure BM25 misses "where does she work?" because no memory contains the word "work." You need both.
 
 ### 3. Multi-hop expansion
 
@@ -211,7 +210,7 @@ Top 20 candidates go to `gpt-4o-mini` in a single batch call. It returns 0–1 r
 
 Three sections in priority order, with `tiktoken` measuring before each line is added:
 
-1. **Stable user facts** — `subject="user"`, type in `{fact, preference, correction}`. These are "always-on" things the agent should know.
+1. **Stable user facts** `subject="user"`, type in `{fact, preference, correction}`. These are "always-on" things the agent should know.
 2. **Other relevant memories** — opinions, events, anything else that scored high.
 3. **Recent session turns** — last 5 turns from the same session, first user message of each. Tail context.
 
@@ -242,7 +241,7 @@ Detection happens in `extraction.py`'s loop, before insert. Each new memory goes
 3. **Stable temporal facts** require LLM-confirmed contradiction (>0.8 confidence) before superseding. Allergies and hometowns shouldn't be overwritten on a vague signal.
 4. **Default** → fresh memory, no conflict.
 
-I resolve at write time — not read time — because doing this on every recall would be slow and expensive.
+I resolve at write time not read time  because doing this on every recall would be slow and expensive.
 
 ### Supersession chain, not deletion
 
