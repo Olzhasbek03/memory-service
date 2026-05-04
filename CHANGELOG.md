@@ -2,7 +2,7 @@
 
 This is the iteration history of the memory service. Each entry is a
 real change I made, what I observed, and what came next. Numbers come
-from the recall-quality fixture in `fixtures/conversations.json` —
+from the recall-quality fixture in `fixtures/conversations.json` 
 the same fixture is in `tests/test_recall_quality.py`.
 
 I built a working skeleton (v1) on day one and then iterated layer
@@ -23,7 +23,7 @@ so if a later layer broke, I'd still have a submittable version.
 
 **Deliberately did NOT change:**
 - Splitting `location` into `location.current` / `location.hometown` /
-  `location.previous` / `location.travel_plan`. Speculative — none of
+  `location.previous` / `location.travel_plan`. Speculative  none of
   my fixture probes exercise that distinction, and the eval may not
   either. Adding it would risk breaking 100% recall on cases I can
   measure for cases I can't. Documented as future work.
