@@ -10,9 +10,15 @@ Built over 2 days for the Higgsfield AI Engineer take-home.
 ```bash
 git clone <this repo> memory-service
 cd memory-service
-cp .env.example .env
-# put your OpenAI key into .env
+
+# Optional: set OPENAI_API_KEY for full extraction and recall quality.
+# Without it the service still boots and the HTTP contract works,
+# but LLM-based extraction, embeddings, query rewriting, and
+# reranking will degrade gracefully to no-ops.
+# export OPENAI_API_KEY=sk-...
+
 docker compose up --build
+
 ```
 
 Service is on `http://localhost:8080`. See `.env.example` for env vars (`OPENAI_API_KEY` required, `MEMORY_AUTH_TOKEN` optional).
@@ -217,6 +223,12 @@ When the budget is tight, sections drop in reverse order. The reasoning: an agen
 
 The eval explicitly tests Stripe → Notion. Most submissions probably get partial credit here; full credit needs three things to work together.
 
+A second nuance: not all keys behave the same way. 
+**Singular keys**
+(employment, location, family_spouse, relationship_status) only have one active value at a time — a new value supersedes the old one.
+**Additive keys** 
+(pet, hobby, language, skill, food_allergy, family_child) allow multiple active values: a user can have two pets or speak three languages. For additive keys, a new memory only supersedes an existing one if they share an entity (same pet name, same language). Otherwise it inserts as a new memory alongside.
+
 ### Key normalization
 
 The LLM is not deterministic about keys. One run produces `"job"`, another `"employment"`, another `"employer"`. I maintain a hand-curated map collapsing 25+ variants to canonical topics (`job`, `work`, `employer`, `occupation`, `profession`, `career`, `company`, `workplace` → `employment`). Without this, supersession doesn't fire and both Stripe and Notion stay active.
@@ -285,6 +297,9 @@ python3 -m pytest tests/test_robustness.py -v
 
 # Recall quality fixture (5 scenarios, 7 probes, prints a report)
 python3 -m pytest tests/test_recall_quality.py -v -s
+
+# Restart persistence test (required by spec)
+bash tests/test_persistence_restart.sh
 ```
 
 The recall quality runner ingests the fixture in `fixtures/conversations.json`, runs every probe against /recall, prints per-probe hit/miss, and asserts ≥70% recall. Current score on this implementation: **7/7 = 100%**. I used this fixture as my main feedback loop while iterating — every layer in the CHANGELOG was validated against it.

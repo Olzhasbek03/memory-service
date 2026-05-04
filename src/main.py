@@ -141,7 +141,7 @@ def ingest_turn(req: TurnRequest, _: bool = Depends(check_auth)):
         try:
             if mem.get("id") and mem.get("value"):
                 store_embedding(mem["id"], "memory", mem["value"])
-                print(f"📎 Embedded memory: {mem['key']} = {mem['value'][:50]}")
+                print(f" Embedded memory: {mem['key']} = {mem['value'][:50]}")
         except Exception as e:
             print(f"  Memory embedding failed: {e}")
 
