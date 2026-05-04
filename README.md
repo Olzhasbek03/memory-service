@@ -21,7 +21,7 @@ docker compose up --build
 
 ```
 
-Service is on `http://localhost:8080`. See `.env.example` for env vars (`OPENAI_API_KEY` required, `MEMORY_AUTH_TOKEN` optional).
+Service is on `http://localhost:8080`. See `.env.example` for env vars (`OPENAI_API_KEY` optional for boot but required for full recall quality, `MEMORY_AUTH_TOKEN` optional).
 
 To verify:
 
@@ -221,7 +221,7 @@ When the budget is tight, sections drop in reverse order. The reasoning: an agen
 
 ## Fact evolution
 
-The eval explicitly tests Stripe → Notion. Most submissions probably get partial credit here; full credit needs three things to work together.
+The eval explicitly tests Stripe → Notion. 
 
 A second nuance: not all keys behave the same way. 
 **Singular keys**

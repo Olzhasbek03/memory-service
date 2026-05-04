@@ -4,6 +4,12 @@
 
 set -e
 
+if [ -z "$OPENAI_API_KEY" ]; then
+  echo "⚠️  OPENAI_API_KEY is required for this test."
+  echo "The service boots without it, but extraction needs a key."
+  exit 1
+fi
+
 BASE="http://localhost:8080"
 
 echo "=== Setup: clean start ==="
